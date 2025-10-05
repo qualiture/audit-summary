@@ -4,6 +4,8 @@ import { execSync } from 'node:child_process';
 import { NpmLsNode, NpmLsTree } from './types/Npm';
 import { AsciiTable3 } from 'ascii-table3';
 import chalk from 'chalk';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 const SEV_ORDER: Record<Severity, number> = {
     critical: 4,
@@ -13,6 +15,20 @@ const SEV_ORDER: Record<Severity, number> = {
     info: 0
 };
 const SEV_KEYS: Severity[] = ['critical', 'high', 'moderate', 'low', 'info'];
+
+interface PackageThresholds {
+    severityThresholdCritical: number;
+    severityThresholdHigh: number;
+    severityThresholdModerate: number;
+    severityThresholdLow: number;
+}
+
+interface AuditConfig {
+    packages: {
+        [packageName: string]: PackageThresholds;
+        default: PackageThresholds;
+    };
+}
 
 export default class AuditSumary {
     private options: OptionValues;
@@ -24,6 +40,12 @@ export default class AuditSumary {
     }
 
     public executeAudit() {
+        // Handle init flag
+        if (this.options.init) {
+            this.initConfigFile();
+            return;
+        }
+
         const jsonMode = this.options.json ?? (false as boolean);
         const wsIdx = this.options.workspace as string;
 
@@ -59,6 +81,8 @@ export default class AuditSumary {
                 this.outputJSON(perRootCounts, globalCounts, tree, latestVersions);
             } else {
                 this.outputTerminal(byRoot, perRootCounts, globalCounts, tree, latestVersions);
+                // Check thresholds if config file exists
+                this.checkThresholds(perRootCounts);
             }
         }
     }
@@ -344,6 +368,199 @@ export default class AuditSumary {
             if (!out) throw err;
             return JSON.parse(out);
         }
+    }
+
+    /**
+     * Creates an .audit-summary.json file with current vulnerability counts for each root package
+     */
+    private initConfigFile() {
+        const configPath = path.join(process.cwd(), '.audit-summary.json');
+
+        // Check if file already exists
+        if (fs.existsSync(configPath)) {
+            console.error(chalk.red('Error: .audit-summary.json already exists.'));
+            console.log('Remove the existing file first if you want to reinitialize.');
+            process.exit(1);
+        }
+
+        console.log('Initializing .audit-summary.json...');
+        console.log('Analyzing current vulnerabilities...');
+
+        // Get current vulnerability data
+        const audit = this.getAudit();
+        const tree = this.getDependencyTree();
+        const rootsMap = this.buildRequiredByRootsMap(tree);
+        const vulnerabilityList = Object.values(audit.vulnerabilities ?? {});
+
+        // Build the config structure
+        const config: any = {
+            packages: {}
+        };
+
+        if (vulnerabilityList.length > 0) {
+            const byRoot = this.getVulnerabilitiesByRoot(vulnerabilityList, rootsMap);
+            const perRootCounts = this.getVulnerabilitiesPerRootCount(byRoot);
+
+            // Sort packages alphabetically
+            const sortedRoots = Array.from(perRootCounts.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+
+            // Add each root package with its current vulnerability counts
+            for (const [root, { counts }] of sortedRoots) {
+                config.packages[root] = {
+                    severityThresholdCritical: counts.critical,
+                    severityThresholdHigh: counts.high,
+                    severityThresholdModerate: counts.moderate,
+                    severityThresholdLow: counts.low
+                };
+            }
+        }
+
+        // Add default thresholds
+        config.packages.default = {
+            severityThresholdCritical: 0,
+            severityThresholdHigh: 0,
+            severityThresholdModerate: 0,
+            severityThresholdLow: 0
+        };
+
+        // Write the config file
+        try {
+            fs.writeFileSync(configPath, JSON.stringify(config, null, 4), 'utf-8');
+            console.log(chalk.green('✓ Successfully created .audit-summary.json'));
+            console.log(`\nFile created at: ${configPath}`);
+            console.log('\nThe file has been populated with current vulnerability counts for each package.');
+            console.log('You can now adjust the thresholds as needed.');
+        } catch (error) {
+            console.error(chalk.red('Error writing .audit-summary.json:'), error);
+            process.exit(1);
+        }
+    }
+
+    /**
+     * Load the .audit-summary.json config file if it exists
+     */
+    private loadConfig(): AuditConfig | null {
+        const configPath = path.join(process.cwd(), '.audit-summary.json');
+
+        if (!fs.existsSync(configPath)) {
+            return null;
+        }
+
+        try {
+            const configContent = fs.readFileSync(configPath, 'utf-8');
+            return JSON.parse(configContent) as AuditConfig;
+        } catch (error) {
+            console.error(chalk.red('Error reading .audit-summary.json:'), error);
+            return null;
+        }
+    }
+
+    /**
+     * Check if vulnerability counts exceed the thresholds defined in .audit-summary.json
+     */
+    private checkThresholds(perRootCounts: Map<string, { vulns: VulnerabilityView[]; counts: PerRootCounts }>) {
+        const config = this.loadConfig();
+
+        if (!config) {
+            // No config file, skip threshold checking
+            return;
+        }
+
+        const violations: Array<{
+            package: string;
+            severity: string;
+            current: number;
+            threshold: number;
+        }> = [];
+
+        // Check each root package
+        for (const [rootPackage, { counts }] of perRootCounts.entries()) {
+            // Get thresholds for this package (or use default)
+            const thresholds = config.packages[rootPackage] ?? config.packages.default;
+
+            if (!thresholds) {
+                // If no default is set, skip this package
+                continue;
+            }
+
+            // Check each severity level
+            if (counts.critical > thresholds.severityThresholdCritical) {
+                violations.push({
+                    package: rootPackage,
+                    severity: 'critical',
+                    current: counts.critical,
+                    threshold: thresholds.severityThresholdCritical
+                });
+            }
+
+            if (counts.high > thresholds.severityThresholdHigh) {
+                violations.push({
+                    package: rootPackage,
+                    severity: 'high',
+                    current: counts.high,
+                    threshold: thresholds.severityThresholdHigh
+                });
+            }
+
+            if (counts.moderate > thresholds.severityThresholdModerate) {
+                violations.push({
+                    package: rootPackage,
+                    severity: 'moderate',
+                    current: counts.moderate,
+                    threshold: thresholds.severityThresholdModerate
+                });
+            }
+
+            if (counts.low > thresholds.severityThresholdLow) {
+                violations.push({
+                    package: rootPackage,
+                    severity: 'low',
+                    current: counts.low,
+                    threshold: thresholds.severityThresholdLow
+                });
+            }
+        }
+
+        // If there are violations, report them and exit
+        if (violations.length > 0) {
+            this.reportThresholdViolations(violations);
+            process.exit(1);
+        }
+    }
+
+    /**
+     * Report threshold violations to the console
+     */
+    private reportThresholdViolations(
+        violations: Array<{
+            package: string;
+            severity: string;
+            current: number;
+            threshold: number;
+        }>
+    ) {
+        console.error();
+        console.error(chalk.red.bold('✗ Vulnerability threshold exceeded!'));
+        console.error();
+        console.error('The following packages have more vulnerabilities than allowed:');
+        console.error();
+
+        for (const v of violations) {
+            const severityColor =
+                v.severity === 'critical'
+                    ? chalk.magentaBright.bold
+                    : v.severity === 'high'
+                    ? chalk.redBright.bold
+                    : v.severity === 'moderate'
+                    ? chalk.yellowBright.bold
+                    : chalk.white;
+
+            console.error(`  ${chalk.bold(v.package)} - ${severityColor(v.severity)}: ` + `${chalk.red(v.current)} (threshold: ${v.threshold})`);
+        }
+
+        console.error();
+        console.error('Please review and fix the vulnerabilities, or update the thresholds in .audit-summary.json');
+        console.error();
     }
 
     /**
