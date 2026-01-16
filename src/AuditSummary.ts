@@ -336,14 +336,18 @@ export default class AuditSumary {
                 targetRoots = Array.from(affectedRoots);
             } else {
                 // Fallback to old behavior if nodes field is not available
+                // This is less accurate but provides reasonable coverage
                 let roots = Array.from(rootsMap.get(v.name) ?? []);
                 
-                // If the vulnerable package name matches one of its roots, that means
-                // the package exists both as a root dependency and as a nested dependency.
-                // We should exclude the self-reference (root with same name as vulnerable package)
-                // because if the root itself were vulnerable, it would be listed separately in
-                // the vulnerabilities. This prevents incorrectly marking a non-vulnerable root
-                // version as vulnerable when only a nested version is vulnerable.
+                // Special case: If the vulnerable package name matches one of its roots,
+                // exclude the self-reference. This handles the common case where:
+                // - Package X version A (non-vulnerable) is a root dependency
+                // - Package X version B (vulnerable) is a nested dependency of another root
+                // Without the nodes field, we can't distinguish versions, but we can assume
+                // that if X is both a root and has vulnerabilities, the root version is likely
+                // not the vulnerable one (npm would typically resolve to the latest safe version).
+                // Note: This is a heuristic and may occasionally be incorrect, but it prevents
+                // more false positives than it creates false negatives.
                 if (roots.includes(v.name)) {
                     roots = roots.filter(r => r !== v.name);
                 }
@@ -373,14 +377,18 @@ export default class AuditSumary {
      *   "node_modules/@scope/package/node_modules/dep" -> "@scope/package"
      */
     private extractRootFromNodePath(nodePath: string): string | null {
-        // Split by node_modules to get path segments
-        const parts = nodePath.split('node_modules/').filter(p => p.length > 0);
+        // Normalize path and split by node_modules to get path segments
+        // npm always uses forward slashes, even on Windows
+        const normalized = nodePath.replace(/\\/g, '/').trim();
+        const parts = normalized.split('node_modules/').filter(p => p.trim().length > 0);
         
         if (parts.length === 0) {
             return null;
         }
         
-        // The first part after node_modules/ is the root dependency
+        // The first segment after the first 'node_modules/' contains the root package
+        // For example: "node_modules/@ui5/cli/node_modules/glob" splits to ["@ui5/cli/", "glob"]
+        // We take the first segment: "@ui5/cli/"
         const firstPart = parts[0];
         
         if (!firstPart) {
@@ -389,15 +397,17 @@ export default class AuditSumary {
         
         // Handle scoped packages (@scope/package)
         if (firstPart.startsWith('@')) {
-            // For scoped packages, we need to keep the scope and package name
-            // Format: @scope/package/...
+            // For scoped packages, we need to extract both scope and package name
+            // Format: @scope/package/... or @scope/package
             const scopedParts = firstPart.split('/');
             if (scopedParts.length >= 2) {
                 return `${scopedParts[0]}/${scopedParts[1]}`;
             }
+            // Malformed scoped package (missing package name), return null
+            return null;
         }
         
-        // For non-scoped packages, take everything before the first slash
+        // For non-scoped packages, take everything before the first slash (if any)
         const slashIndex = firstPart.indexOf('/');
         if (slashIndex > 0) {
             return firstPart.substring(0, slashIndex);
