@@ -305,15 +305,59 @@ export default class AuditSumary {
 
     /**
      * Build: root -> list of vulnerabilities (later dedup per root)
+     * Uses the `nodes` field from npm audit to determine which root dependencies
+     * are actually affected by each vulnerability, preventing false positives when
+     * a non-vulnerable version of a package exists as a root dependency alongside
+     * vulnerable versions in nested dependencies.
      * @param vulnerabilityList
+     * @param rootsMap
      */
     private getVulnerabilitiesByRoot(vulnerabilityList: AuditVulnerability[], rootsMap: Map<string, Set<string>>) {
         const byRoot = new Map<string, VulnerabilityView[]>();
 
         for (const v of vulnerabilityList) {
             const severity = this.normSeverity(v.severity);
-            const roots = Array.from(rootsMap.get(v.name) ?? []);
-            const targetRoots = roots.length ? roots : ['(unresolved root)'];
+            let targetRoots: string[] = [];
+            
+            // Use the `nodes` field if available to determine which roots are affected
+            if (v.nodes && v.nodes.length > 0) {
+                // Extract root package names from node paths
+                // Example: "node_modules/@ui5/cli/node_modules/glob" -> "@ui5/cli"
+                //          "node_modules/glob" -> "glob"
+                const affectedRoots = new Set<string>();
+                
+                for (const nodePath of v.nodes) {
+                    const root = this.extractRootFromNodePath(nodePath);
+                    if (root) {
+                        affectedRoots.add(root);
+                    }
+                }
+                
+                targetRoots = Array.from(affectedRoots);
+            } else {
+                // Fallback to old behavior if nodes field is not available
+                // This is less accurate but provides reasonable coverage
+                let roots = Array.from(rootsMap.get(v.name) ?? []);
+                
+                // Special case: If the vulnerable package name matches one of its roots,
+                // exclude the self-reference. This handles the common case where:
+                // - Package X version A (non-vulnerable) is a root dependency
+                // - Package X version B (vulnerable) is a nested dependency of another root
+                // Without the nodes field, we can't distinguish versions, but we can assume
+                // that if X is both a root and has vulnerabilities, the root version is likely
+                // not the vulnerable one (npm would typically resolve to the latest safe version).
+                // Note: This is a heuristic and may occasionally be incorrect, but it prevents
+                // more false positives than it creates false negatives.
+                if (roots.includes(v.name)) {
+                    roots = roots.filter(r => r !== v.name);
+                }
+                
+                targetRoots = roots;
+            }
+            
+            if (targetRoots.length === 0) {
+                targetRoots = ['(unresolved root)'];
+            }
 
             for (const r of targetRoots) {
                 const arr = byRoot.get(r) ?? [];
@@ -323,6 +367,54 @@ export default class AuditSumary {
         }
 
         return byRoot;
+    }
+    
+    /**
+     * Extract the root package name from a node_modules path.
+     * Examples:
+     *   "node_modules/@ui5/cli/node_modules/glob" -> "@ui5/cli"
+     *   "node_modules/glob" -> "glob"
+     *   "node_modules/@scope/package/node_modules/dep" -> "@scope/package"
+     */
+    private extractRootFromNodePath(nodePath: string): string | null {
+        // Normalize path and split by node_modules to get path segments
+        // npm always uses forward slashes, even on Windows
+        const normalized = nodePath.replace(/\\/g, '/').trim();
+        const parts = normalized.split('node_modules/').filter(p => p.trim().length > 0);
+        
+        if (parts.length === 0) {
+            return null;
+        }
+        
+        // The first segment after the first 'node_modules/' contains the root package
+        // For example: "node_modules/@ui5/cli/node_modules/glob" splits to ["@ui5/cli/", "glob"]
+        // We take the first segment: "@ui5/cli/"
+        const firstPart = parts[0];
+        
+        if (!firstPart) {
+            return null;
+        }
+        
+        // Handle scoped packages (@scope/package)
+        if (firstPart.startsWith('@')) {
+            // For scoped packages, we need to extract both scope and package name
+            // Format: @scope/package/... or @scope/package
+            const scopedParts = firstPart.split('/');
+            if (scopedParts.length >= 2) {
+                return `${scopedParts[0]}/${scopedParts[1]}`;
+            }
+            // Malformed scoped package (missing package name), return null
+            return null;
+        }
+        
+        // For non-scoped packages, take everything before the first slash (if any)
+        const slashIndex = firstPart.indexOf('/');
+        if (slashIndex > 0) {
+            return firstPart.substring(0, slashIndex);
+        }
+        
+        // If no slash, the whole part is the package name
+        return firstPart;
     }
 
     private getVulnerabilityList(audit: AuditJson, jsonMode: boolean) {
