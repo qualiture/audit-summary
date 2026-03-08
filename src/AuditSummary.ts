@@ -454,7 +454,7 @@ export default class AuditSumary {
 
     private execShellCommand(cmd: string) {
         try {
-            return JSON.parse(execSync(cmd, { stdio: 'pipe' }).toString());
+            return JSON.parse(execSync(cmd, { stdio: 'pipe', maxBuffer: 1024 * 1024 * 5 }).toString());
         } catch (err: any) {
             const out = err?.stdout?.toString();
             if (!out) throw err;
