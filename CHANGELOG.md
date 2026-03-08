@@ -2,7 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.2.0] - 2026-03-08
+
+### Fixed
+
+- Increased `maxBuffer` size to 5 MB to handle large audit outputs
+- Updated NPM packages
 
 ## [1.1.0] - 2026-01-16
 
@@ -22,18 +27,18 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
--   Updated NPM packages
--   Refactored npm publish workflow for simplicity
+- Updated NPM packages
+- Refactored npm publish workflow for simplicity
 
 ## [1.0.0] - 2025-10-05
 
 ### Added
 
--   README documentation with initial release
--   Config file creation functionality
--   Threshold checks for audit validation
--   Version info support
+- README documentation with initial release
+- Config file creation functionality
+- Threshold checks for audit validation
+- Version info support
 
 ### Initial Release
 
--   Initial version with core audit summary functionality
+- Initial version with core audit summary functionality
